@@ -21,7 +21,27 @@ function Log($m){ "$((Get-Date).ToString('s'))  $m" | Out-File -FilePath $LogFil
 
 function Ensure-Key($p){ if(-not(Test-Path $p)){ New-Item -Path $p -Force | Out-Null } }
 function Get-Reg($p,$n){ try{ (Get-ItemProperty -Path $p -Name $n -ErrorAction Stop).$n }catch{ $null } }
-function Set-Reg($p,$n,$v,$t='DWord'){ Ensure-Key $p; Set-ItemProperty -Path $p -Name $n -Value $v -Type $t -Force }
+function Set-Reg($p,$n,$v,$t='DWord'){
+    try{ Ensure-Key $p }catch{ Log "Ensure-Key failed $p : $_"; return $false }
+    try{
+        Set-ItemProperty -Path $p -Name $n -Value $v -Type $t -Force -ErrorAction Stop
+        return $true
+    }catch{
+        Log "Set-Reg denied $p\$n : $_"
+        try{
+            $hive,$sub = if($p -match '^HKCU:\\(.*)$'){ 'HKCU',$Matches[1] }
+                         elseif($p -match '^HKLM:\\(.*)$'){ 'HKLM',$Matches[1] }
+                         elseif($p -match '^HKCR:\\(.*)$'){ 'HKCR',$Matches[1] }
+                         else { $null,$null }
+            if($hive){
+                $typeArg = switch($t){ 'DWord'{'REG_DWORD'} 'QWord'{'REG_QWORD'} 'String'{'REG_SZ'} 'ExpandString'{'REG_EXPAND_SZ'} 'MultiString'{'REG_MULTI_SZ'} 'Binary'{'REG_BINARY'} default {'REG_SZ'} }
+                & reg.exe add "$hive\$sub" /v $n /t $typeArg /d "$v" /f 2>&1 | Out-Null
+                if($LASTEXITCODE -eq 0){ return $true }
+            }
+        }catch{ Log "reg.exe fallback failed $p\$n : $_" }
+        return $false
+    }
+}
 function Del-Reg($p,$n){ try{ Remove-ItemProperty -Path $p -Name $n -Force -ErrorAction Stop }catch{} }
 
 function Snap-Reg($p,$n){
@@ -494,6 +514,374 @@ Add-Tweak 'pause_updates_7d' 'Cleanup' 'Pause Windows Update 7 days' '' {
     ,$s
 }
 
+# ===== POWER & CPU (extras) =====
+Add-Tweak 'fast_startup_off' 'Power & CPU' 'Disable Fast Startup (hybrid boot)' 'Cleaner cold boot. Slightly longer boot but fewer wake-from-hibernation driver quirks.' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'
+    $s += Snap-Reg $p 'HiberbootEnabled'
+    Set-Reg $p 'HiberbootEnabled' 0
+    ,$s
+}
+Add-Tweak 'monitor_never_ac' 'Power & CPU' 'Display: never turn off on AC' 'Prevents display blanking during long loads, cutscenes, streams.' {
+    powercfg /setacvalueindex scheme_current sub_video videoidle 0 2>$null | Out-Null
+    powercfg /setactive scheme_current 2>$null | Out-Null
+    ,@(@{ Kind='powercfg_set'; Setting='VIDEOIDLE' })
+}
+Add-Tweak 'sleep_never_ac' 'Power & CPU' 'Sleep: never on AC' 'PC stays awake during big downloads/shader compiles.' {
+    powercfg /setacvalueindex scheme_current sub_sleep standbyidle 0 2>$null | Out-Null
+    powercfg /setactive scheme_current 2>$null | Out-Null
+    ,@(@{ Kind='powercfg_set'; Setting='STANDBYIDLE' })
+}
+Add-Tweak 'distribute_timers' 'Power & CPU' 'DistributeTimers = 1 (spread timers across CPUs)' 'Reduces timer contention on a single core when many processes set timers.' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel'
+    $s += Snap-Reg $p 'DistributeTimers'
+    Set-Reg $p 'DistributeTimers' 1
+    ,$s
+}
+Add-Tweak 'global_timer_res' 'Power & CPU' 'GlobalTimerResolutionRequests = 1' 'Lets any app request high-resolution timers system-wide (Win11 per-process default otherwise).' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel'
+    $s += Snap-Reg $p 'GlobalTimerResolutionRequests'
+    Set-Reg $p 'GlobalTimerResolutionRequests' 1
+    ,$s
+}
+Add-Tweak 'perfboost_aggressive' 'Power & CPU' 'Processor Performance Boost Mode = Aggressive' 'Turbo/boost engages faster and more often under load.' {
+    powercfg /setacvalueindex scheme_current sub_processor PERFBOOSTMODE 2 2>$null | Out-Null
+    powercfg /setactive scheme_current 2>$null | Out-Null
+    ,@(@{ Kind='powercfg_set'; Setting='PERFBOOSTMODE' })
+}
+
+# ===== GPU & DISPLAY (extras) =====
+Add-Tweak 'mpo_off' 'GPU & Display' 'Disable Multi-Plane Overlay (MPO)' 'Fixes stutter/flicker on many GPUs, especially Chrome/DWM compositing bugs.' {
+    $s=@(); $p='HKLM:\SOFTWARE\Microsoft\Windows\Dwm'
+    $s += Snap-Reg $p 'OverlayTestMode'
+    Set-Reg $p 'OverlayTestMode' 5
+    ,$s
+}
+Add-Tweak 'vrr_windowed_on' 'GPU & Display' 'Enable VRR for windowed games' 'G-Sync / FreeSync works in borderless-window mode, not just exclusive fullscreen.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+    $s += Snap-Reg $p 'DirectXUserGlobalSettings'
+    Set-Reg $p 'DirectXUserGlobalSettings' 'VRROptimizeEnable=1;' 'String'
+    ,$s
+}
+Add-Tweak 'fse_legacy_off' 'GPU & Display' 'Disable legacy GameDVR FSE feature flags' 'Complements the true-fullscreen tweak by clearing old FSE enforcement bits.' {
+    $s=@(); $p='HKCU:\System\GameConfigStore'
+    $s += Snap-Reg $p 'GameDVR_EFSEFeatureFlags'
+    Set-Reg $p 'GameDVR_EFSEFeatureFlags' 0
+    ,$s
+}
+Add-Tweak 'mmcss_dx_priority' 'GPU & Display' 'MMCSS DirectX task: GPU Prio 8 / Prio 6' 'Raises Direct3D scheduling priority alongside the Games task.' {
+    $s=@(); $p='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\DirectX'
+    $s += Snap-Reg $p 'GPU Priority'
+    $s += Snap-Reg $p 'Priority'
+    Set-Reg $p 'GPU Priority' 8
+    Set-Reg $p 'Priority' 6
+    ,$s
+}
+
+# ===== NETWORK (extras) =====
+Add-Tweak 'default_ttl_64' 'Network' 'DefaultTTL = 64' 'Standard Linux-style TTL; avoids some older NAT bugs.' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+    $s += Snap-Reg $p 'DefaultTTL'
+    Set-Reg $p 'DefaultTTL' 64
+    ,$s
+}
+Add-Tweak 'tcp1323opts_on' 'Network' 'Tcp1323Opts = 1 (window scaling + timestamps)' 'Enables large TCP window scaling; essential on gigabit.' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+    $s += Snap-Reg $p 'Tcp1323Opts'
+    Set-Reg $p 'Tcp1323Opts' 1
+    ,$s
+}
+Add-Tweak 'tcp_retrans_3' 'Network' 'TcpMaxDataRetransmissions = 3' 'Faster connection teardown on dropped links instead of hanging.' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+    $s += Snap-Reg $p 'TcpMaxDataRetransmissions'
+    Set-Reg $p 'TcpMaxDataRetransmissions' 3
+    ,$s
+}
+Add-Tweak 'tcp_timedwait_30' 'Network' 'TcpTimedWaitDelay = 30s' 'Recycles ephemeral ports quicker after connection close.' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+    $s += Snap-Reg $p 'TcpTimedWaitDelay'
+    Set-Reg $p 'TcpTimedWaitDelay' 30
+    ,$s
+}
+Add-Tweak 'ie_max_connections' 'Network' 'Max HTTP connections per server = 10' 'Faster Steam/Epic/browser parallel downloads.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    $s += Snap-Reg $p 'MaxConnectionsPer1_0Server'
+    $s += Snap-Reg $p 'MaxConnectionsPerServer'
+    Set-Reg $p 'MaxConnectionsPer1_0Server' 10
+    Set-Reg $p 'MaxConnectionsPerServer' 10
+    ,$s
+}
+Add-Tweak 'prefer_ipv4' 'Network' 'Prefer IPv4 over IPv6' 'Avoids IPv6 resolution lag for games that only use IPv4. IPv6 still works.' {
+    $s=@(); $p='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters'
+    $s += Snap-Reg $p 'DisabledComponents'
+    Set-Reg $p 'DisabledComponents' 0x20
+    ,$s
+}
+Add-Tweak 'rss_on' 'Network' 'Enable Receive Side Scaling (RSS)' 'Spreads NIC interrupts across CPU cores; reduces packet-processing bottleneck.' {
+    & netsh int tcp set global rss=enabled 2>$null | Out-Null
+    ,@(@{ Kind='netsh_rss'; Prev='default' })
+}
+Add-Tweak 'autotuning_normal' 'Network' 'TCP autotuning level = normal' 'Restores default dynamic window scaling if a previous tool disabled it.' {
+    & netsh int tcp set global autotuninglevel=normal 2>$null | Out-Null
+    ,@(@{ Kind='netsh_autotune'; Prev='default' })
+}
+
+# ===== GAMING (extras) =====
+Add-Tweak 'kb_delay_min' 'Gaming' 'Keyboard repeat delay = shortest' 'Faster key-repeat kick-in (e.g. chat spam, menus).' {
+    $s=@(); $p='HKCU:\Control Panel\Keyboard'
+    $s += Snap-Reg $p 'KeyboardDelay'
+    Set-Reg $p 'KeyboardDelay' '0' 'String'
+    ,$s
+}
+Add-Tweak 'kb_speed_max' 'Gaming' 'Keyboard repeat rate = fastest' 'Max KeyboardSpeed once repeating.' {
+    $s=@(); $p='HKCU:\Control Panel\Keyboard'
+    $s += Snap-Reg $p 'KeyboardSpeed'
+    Set-Reg $p 'KeyboardSpeed' '31' 'String'
+    ,$s
+}
+Add-Tweak 'sticky_keys_prompt_off' 'Gaming' 'Disable Sticky Keys shortcut prompt' 'No popup when tapping Shift 5 times during a match.' {
+    $s=@(); $p='HKCU:\Control Panel\Accessibility\StickyKeys'
+    $s += Snap-Reg $p 'Flags'
+    Set-Reg $p 'Flags' '506' 'String'
+    ,$s
+}
+Add-Tweak 'filter_keys_prompt_off' 'Gaming' 'Disable Filter Keys shortcut prompt' 'No popup when holding Right-Shift.' {
+    $s=@(); $p='HKCU:\Control Panel\Accessibility\Keyboard Response'
+    $s += Snap-Reg $p 'Flags'
+    Set-Reg $p 'Flags' '122' 'String'
+    ,$s
+}
+Add-Tweak 'xbox_historical_capture_off' 'Gaming' 'Disable background Xbox game capture' 'Stops silent DVR buffering (CPU + disk savings).' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR'
+    $s += Snap-Reg $p 'HistoricalCaptureEnabled'
+    Set-Reg $p 'HistoricalCaptureEnabled' 0
+    ,$s
+}
+
+# ===== SERVICES (extras) =====
+Add-Tweak 'bits_manual' 'Services' 'BITS (Background Intelligent Transfer) -> Manual' 'Windows Update/Store still work; stops idle background transfers.' {
+    $snap = Snap-Svc 'BITS'; Set-Svc 'BITS' 'Manual'; ,@($snap)
+}
+Add-Tweak 'wisvc_off' 'Services' 'Windows Insider Service -> Disabled' 'Only used by the Insider Program. Safe off for most users.' {
+    $snap = Snap-Svc 'wisvc'; Set-Svc 'wisvc' 'Disabled'; ,@($snap)
+}
+Add-Tweak 'cscservice_manual' 'Services' 'Offline Files (CscService) -> Manual' 'Only used by Domain-joined PCs with Offline Files. Manual lets it start on demand.' {
+    $snap = Snap-Svc 'CscService'; Set-Svc 'CscService' 'Manual'; ,@($snap)
+}
+Add-Tweak 'phonesvc_manual' 'Services' 'Phone Service -> Manual' 'Legacy cellular API. Manual is safe even on cellular laptops.' {
+    $snap = Snap-Svc 'PhoneSvc'; Set-Svc 'PhoneSvc' 'Manual'; ,@($snap)
+}
+Add-Tweak 'wallet_manual' 'Services' 'WalletService -> Manual' 'Only invoked by Microsoft Wallet / UWP payments.' {
+    $snap = Snap-Svc 'WalletService'; Set-Svc 'WalletService' 'Manual'; ,@($snap)
+}
+Add-Tweak 'wia_manual' 'Services' 'Windows Image Acquisition (stisvc) -> Manual' 'Still starts on demand when scanning; idle saved otherwise.' {
+    $snap = Snap-Svc 'stisvc'; Set-Svc 'stisvc' 'Manual'; ,@($snap)
+}
+Add-Tweak 'dps_manual' 'Services' 'Diagnostic Policy Service -> Manual' 'Troubleshooters still launch on demand; stops idle polling.' {
+    $snap = Snap-Svc 'DPS'; Set-Svc 'DPS' 'Manual'; ,@($snap)
+}
+
+# ===== PRIVACY (extras) =====
+Add-Tweak 'location_sensor_off' 'Privacy' 'Disable system-wide Location access' 'Blocks all apps from reading GPS / IP location.' {
+    $s=@(); $p='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Sensor\Overrides\{BFA794E4-F964-4FDB-90F6-51056BFE4B44}'
+    $s += Snap-Reg $p 'SensorPermissionState'
+    Set-Reg $p 'SensorPermissionState' 0
+    ,$s
+}
+Add-Tweak 'find_my_device_off' 'Privacy' 'Disable Find My Device' 'Stops periodic location reporting to Microsoft.' {
+    $s=@(); $p='HKLM:\SOFTWARE\Microsoft\Settings\FindMyDevice'
+    $s += Snap-Reg $p 'LocationSyncEnabled'
+    Set-Reg $p 'LocationSyncEnabled' 0
+    ,$s
+}
+Add-Tweak 'feedback_freq_off' 'Privacy' 'Stop Windows feedback prompts' 'No more "How satisfied are you with Windows" toasts.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Siuf\Rules'
+    $s += Snap-Reg $p 'NumberOfSIUFInPeriod'
+    $s += Snap-Reg $p 'PeriodInNanoSeconds'
+    Set-Reg $p 'NumberOfSIUFInPeriod' 0
+    Set-Reg $p 'PeriodInNanoSeconds' 0
+    ,$s
+}
+Add-Tweak 'bing_start_search_off' 'Privacy' 'Disable Bing / web results in Start search' 'Start menu searches stay local. Faster typing response.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'
+    $s += Snap-Reg $p 'BingSearchEnabled'
+    $s += Snap-Reg $p 'CortanaConsent'
+    Set-Reg $p 'BingSearchEnabled' 0
+    Set-Reg $p 'CortanaConsent' 0
+    ,$s
+}
+Add-Tweak 'wifi_sense_off' 'Privacy' 'Disable Wi-Fi Sense auto-connect' 'Stops auto-joining open/crowdsourced hotspots.' {
+    $s=@(); $p='HKLM:\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config'
+    $s += Snap-Reg $p 'AutoConnectAllowedOEM'
+    Set-Reg $p 'AutoConnectAllowedOEM' 0
+    ,$s
+}
+Add-Tweak 'ceip_off' 'Privacy' 'Disable Customer Experience Improvement Program' 'Stops anonymous usage-stat uploads (SQM).' {
+    $s=@(); $p='HKLM:\SOFTWARE\Microsoft\SQMClient\Windows'
+    $s += Snap-Reg $p 'CEIPEnable'
+    Set-Reg $p 'CEIPEnable' 0
+    ,$s
+}
+
+# ===== VISUAL & STARTUP (extras) =====
+Add-Tweak 'taskbar_search_off' 'Visual & Startup' 'Taskbar search box: hidden' 'Reclaims taskbar space. Win+S still opens search.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'
+    $s += Snap-Reg $p 'SearchboxTaskbarMode'
+    Set-Reg $p 'SearchboxTaskbarMode' 0
+    ,$s
+}
+Add-Tweak 'taskbar_align_left' 'Visual & Startup' 'Taskbar alignment: left' 'Classic Windows alignment instead of centered.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+    $s += Snap-Reg $p 'TaskbarAl'
+    Set-Reg $p 'TaskbarAl' 0
+    ,$s
+}
+Add-Tweak 'taskbar_chat_off' 'Visual & Startup' 'Hide Taskbar Chat icon' 'Removes Teams Consumer chat button.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+    $s += Snap-Reg $p 'TaskbarMn'
+    Set-Reg $p 'TaskbarMn' 0
+    ,$s
+}
+Add-Tweak 'task_view_btn_off' 'Visual & Startup' 'Hide Task View button' 'Win+Tab keyboard shortcut still works.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+    $s += Snap-Reg $p 'ShowTaskViewButton'
+    Set-Reg $p 'ShowTaskViewButton' 0
+    ,$s
+}
+Add-Tweak 'quick_access_recent_off' 'Visual & Startup' 'Hide recent/frequent files in Quick Access' 'Privacy + cleaner Explorer home.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer'
+    $s += Snap-Reg $p 'ShowRecent'
+    $s += Snap-Reg $p 'ShowFrequent'
+    Set-Reg $p 'ShowRecent' 0
+    Set-Reg $p 'ShowFrequent' 0
+    ,$s
+}
+Add-Tweak 'explorer_launch_this_pc' 'Visual & Startup' 'Explorer opens to This PC' 'Instead of Home/Quick Access tab.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+    $s += Snap-Reg $p 'LaunchTo'
+    Set-Reg $p 'LaunchTo' 1
+    ,$s
+}
+Add-Tweak 'copilot_btn_off' 'Visual & Startup' 'Hide Copilot taskbar button' 'Copilot app still launchable from Start.' {
+    $s=@(); $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+    $s += Snap-Reg $p 'ShowCopilotButton'
+    Set-Reg $p 'ShowCopilotButton' 0
+    ,$s
+}
+Add-Tweak 'menu_show_fast' 'Visual & Startup' 'MenuShowDelay = 0 (instant menus)' 'Start menu / context menus open instantly.' {
+    $s=@(); $p='HKCU:\Control Panel\Desktop'
+    $s += Snap-Reg $p 'MenuShowDelay'
+    Set-Reg $p 'MenuShowDelay' '0' 'String'
+    ,$s
+}
+Add-Tweak 'hung_app_fast' 'Visual & Startup' 'Shorter hung-app timeout on shutdown' 'Windows flags frozen apps faster on logoff/shutdown.' {
+    $s=@(); $p='HKCU:\Control Panel\Desktop'
+    $s += Snap-Reg $p 'HungAppTimeout'
+    $s += Snap-Reg $p 'WaitToKillAppTimeout'
+    Set-Reg $p 'HungAppTimeout' '1000' 'String'
+    Set-Reg $p 'WaitToKillAppTimeout' '2000' 'String'
+    ,$s
+}
+
+# ===== CLEANUP (extras) =====
+Add-Tweak 'clear_prefetch' 'Cleanup' 'Clear Prefetch folder' 'Windows regenerates entries on next run; clears stale data.' {
+    $removed = 0
+    if(Test-Path 'C:\Windows\Prefetch'){
+        Get-ChildItem 'C:\Windows\Prefetch' -Filter '*.pf' -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            try{ Remove-Item $_.FullName -Force -ErrorAction Stop; $removed++ }catch{}
+        }
+    }
+    ,@(@{ Kind='info'; Removed=$removed })
+}
+Add-Tweak 'clear_thumb_cache' 'Cleanup' 'Clear Explorer thumbnail cache' 'Rebuilds on browse; fixes stale/corrupt icons.' {
+    $removed = 0
+    $path = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Explorer'
+    if(Test-Path $path){
+        Get-ChildItem $path -Filter 'thumbcache_*.db' -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            try{ Remove-Item $_.FullName -Force -ErrorAction Stop; $removed++ }catch{}
+        }
+    }
+    ,@(@{ Kind='info'; Removed=$removed })
+}
+Add-Tweak 'clear_do_cache' 'Cleanup' 'Clear Delivery Optimization cache' 'Frees GBs if Windows has been seeding updates to other PCs.' {
+    $removed = 0
+    $path = 'C:\Windows\SoftwareDistribution\DeliveryOptimization\Cache'
+    if(Test-Path $path){
+        Get-ChildItem $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            try{ Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop; $removed++ }catch{}
+        }
+    }
+    ,@(@{ Kind='info'; Removed=$removed })
+}
+Add-Tweak 'clear_wer_reports' 'Cleanup' 'Clear Windows Error Report queue' 'Deletes old queued crash dumps.' {
+    $removed = 0
+    foreach($path in 'C:\ProgramData\Microsoft\Windows\WER\ReportQueue','C:\ProgramData\Microsoft\Windows\WER\ReportArchive'){
+        if(Test-Path $path){
+            Get-ChildItem $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                try{ Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop; $removed++ }catch{}
+            }
+        }
+    }
+    ,@(@{ Kind='info'; Removed=$removed })
+}
+# ---------- descriptions fallback (for tweaks whose inline Desc is empty) ----------
+$Descs = @{
+    'prio_separation'            = 'Boosts foreground window (your game) over background processes.'
+    'drivers_in_ram'             = 'Keeps kernel/drivers resident in RAM instead of pagefile. Recommended 16 GB+.'
+    'power_throttling_off'       = 'Prevents Windows from throttling foreground apps to save battery.'
+    'sys_responsiveness'         = 'Reserves 10% CPU for multimedia/games (default 20%).'
+    'core_parking_off'           = 'All CPU cores stay active; no park latency.'
+    'cpu_min_100'                = 'Minimum processor state = 100% on AC power.'
+    'cpu_max_100'                = 'Maximum processor state capped at 100% (no artificial limit).'
+    'usb_suspend_off'            = 'Stops Windows suspending USB devices. Prevents mouse/controller drop-outs.'
+    'tdr_ddi_delay'              = 'Extra GPU DDI timeout grace period; avoids false hangs under heavy load.'
+    'net_throttle_off'           = 'Removes Windows multimedia network throttle (helps online games on 1G+ lines).'
+    'llmnr_off'                  = 'Disables Link-Local Multicast Name Resolution (rarely used, slight latency win).'
+    'netbios_off'                = 'Disables NetBIOS over TCP/IP on all NICs (legacy LAN name service).'
+    'teredo_off'                 = 'Disables Teredo IPv6 tunneling (not used by modern games).'
+    'max_user_port'              = 'Raises ephemeral port range; avoids exhaustion with many concurrent connections.'
+    'disable_gamebar'            = 'Turns off Xbox Game Bar overlay and Game DVR background recording.'
+    'mmcss_games_prio'           = 'Elevates MMCSS Games task scheduling (GPU Priority 8, High I/O).'
+    'fse_true_fullscreen'        = 'Forces true exclusive fullscreen for D3D games (bypasses DWM compositor).'
+    'game_mode_on'               = 'Enables Windows Game Mode (foreground priority + reduced updates during play).'
+    'audio_comm_none'            = 'Prevents Windows from ducking game audio when a voice call starts.'
+    'sysmain_off'                = 'Disables SuperFetch/SysMain. Recommended on SSDs.'
+    'wsearch_off'                = 'Disables Windows Search indexing service. Start menu search still works.'
+    'diagtrack_off'              = 'Disables Connected User Experiences and Telemetry service.'
+    'wer_off'                    = 'Disables Windows Error Reporting upload service.'
+    'delivery_opt_off'           = 'Delivery Optimization to Manual. Windows Update still works directly.'
+    'cdp_off'                    = 'Connected Devices Platform to Manual. Cross-device sharing paused.'
+    'remote_reg_off'             = 'Disables Remote Registry service. Reduces attack surface.'
+    'xbox_services_off'          = 'Xbox Live background services to Manual. Launch games normally.'
+    'mapsbroker_off'             = 'Disables offline Maps download service.'
+    'geolocation_off'            = 'Disables Geolocation service (IP-based location).'
+    'retaildemo_off'             = 'Disables Retail Demo service (store display mode).'
+    'pca_off'                    = 'Program Compatibility Assistant to Manual. Compat dialogs still appear on demand.'
+    'tablet_input_off'           = 'Touch Keyboard / Handwriting to Manual. Only matters on touch devices.'
+    'fax_off'                    = 'Disables Fax service. Almost nobody uses it.'
+    'telemetry_basic'            = 'Sets AllowTelemetry=0 (minimum). Security-essential telemetry still works.'
+    'cortana_off'                = 'Disables Cortana via policy.'
+    'tips_ads_off'               = 'Turns off Tips, Suggestions, and Start/Settings ads.'
+    'activity_history_off'       = 'Stops Windows Timeline / Activity Feed.'
+    'lockscreen_ads_off'         = 'Disables Windows Spotlight / rotating ads on the lock screen.'
+    'advertising_id_off'         = 'Disables per-user Advertising ID.'
+    'app_launch_track_off'       = 'Stops Explorer tracking which apps you launch most.'
+    'speech_rec_off'             = 'Disables online speech recognition (sending voice to MS).'
+    'typing_pers_off'            = 'Disables Inking & Typing Personalization (keystroke harvesting).'
+    'visual_fx_perf'             = 'Sets Visual Effects to "Best performance" (no animations/shadows).'
+    'transparency_off'           = 'Disables Start/Taskbar transparency.'
+    'animations_off'             = 'Disables minimize/maximize window animations.'
+    'widgets_off'                = 'Hides the Widgets taskbar button and disables the pane.'
+    'show_file_ext'              = 'Shows file extensions in Explorer (.exe, .ps1, etc).'
+    'bg_apps_off'                = 'Disables background UWP/Store apps from running when closed.'
+    'onedrive_autostart_off'     = 'Removes OneDrive from HKCU Run autostart.'
+    'teams_autostart_off'        = 'Removes Teams (classic + new MSTeams) from HKCU Run autostart.'
+    'clear_temp'                 = 'Deletes everything in %TEMP% that isn''t locked by a running process.'
+    'clear_wu_cache'             = 'Clears Windows Update download cache (safe; WU re-downloads needed bits).'
+    'flush_dns'                  = 'Flushes DNS resolver cache (ipconfig /flushdns).'
+    'clear_font_cache'           = 'Clears font cache; Windows rebuilds on next login.'
+    'pause_updates_7d'           = 'Sets all 6 PauseUpdates keys for 7 days (Win11 24H2-compatible).'
+}
+
 # ---------- NVIDIA + PER-GAME ----------
 function Test-NvidiaPresent {
     $gpu = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*NVIDIA*' }
@@ -633,7 +1021,9 @@ function Invoke-UndoAll($owner){
                     }
                     'powercfg_h'{ & powercfg /h on 2>$null | Out-Null }
                     'powercfg_set' { }
-                    'netsh_teredo' { & netsh interface teredo set state default 2>$null | Out-Null }
+                    'netsh_teredo'   { & netsh interface teredo set state default 2>$null | Out-Null }
+                    'netsh_rss'      { & netsh int tcp set global rss=default 2>$null | Out-Null }
+                    'netsh_autotune' { & netsh int tcp set global autotuninglevel=normal 2>$null | Out-Null }
                     'dns' {
                         try{
                             if($snap.Prev -and $snap.Prev.Count -gt 0){
@@ -742,7 +1132,7 @@ function Invoke-UndoAll($owner){
     <Border Grid.Row="0" Background="#13131A" Padding="28,20">
       <StackPanel>
         <TextBlock Text="PerfTweaker" FontSize="26" FontWeight="Bold" Foreground="White"/>
-        <TextBlock Text="Windows 11 FPS &amp; latency tuner . 63 tweaks organized into 9 tabs . per-game profiles + NVIDIA"
+        <TextBlock Text="Windows 11 FPS &amp; latency tuner . 112 tweaks organized into 9 tabs . per-game profiles + NVIDIA"
                    Foreground="{StaticResource Muted}" FontSize="12" Margin="0,4,0,0"/>
         <TextBlock Text="Anticheat-safe (VAC / EAC / BattlEye / Vanguard). Restore point + registry backup before Apply."
                    Foreground="#6EE7B7" FontSize="11" Margin="0,4,0,0"/>
@@ -832,16 +1222,64 @@ function Show-UI{
 
     $state = Load-State
     $boxes = @{}
+    $bc = New-Object System.Windows.Media.BrushConverter
+    $hintBg = $bc.ConvertFrom('#2A2A38')
+    $hintFg = $bc.ConvertFrom('#C4B5FD')
     foreach($t in $Tweaks){
         $panel = $tabMap[$t.Tab]
         if(-not $panel){ continue }
+
+        $row = New-Object System.Windows.Controls.StackPanel
+        $row.Orientation = 'Horizontal'
+        $row.Margin = (New-Object System.Windows.Thickness(0,3,0,3))
+
         $cb = New-Object System.Windows.Controls.CheckBox
         $applied = $state.Applied -and $state.Applied[$t.Id]
         $cb.Content = if($applied){ "$($t.Title)   [applied]" } else { $t.Title }
         $cb.IsChecked = (-not $applied)
         $cb.IsEnabled = (-not $applied)
-        if($t.Desc){ $cb.ToolTip = $t.Desc }
-        $panel.Children.Add($cb) | Out-Null
+        $cb.VerticalAlignment = 'Center'
+        $row.Children.Add($cb) | Out-Null
+
+        $desc = $t.Desc
+        if([string]::IsNullOrWhiteSpace($desc) -and $Descs.ContainsKey($t.Id)){ $desc = $Descs[$t.Id] }
+        if([string]::IsNullOrWhiteSpace($desc)){ $desc = $t.Title }
+
+        $hint = New-Object System.Windows.Controls.Border
+        $hint.Width = 18
+        $hint.Height = 18
+        $hint.CornerRadius = New-Object System.Windows.CornerRadius(9)
+        $hint.Background = $hintBg
+        $hint.Margin = (New-Object System.Windows.Thickness(10,0,0,0))
+        $hint.VerticalAlignment = 'Center'
+        $hint.Cursor = [System.Windows.Input.Cursors]::Help
+
+        $tt = New-Object System.Windows.Controls.ToolTip
+        $tt.Background = $bc.ConvertFrom('#1F1F2A')
+        $tt.Foreground = $bc.ConvertFrom('#E5E7EB')
+        $tt.BorderBrush = $bc.ConvertFrom('#8B5CF6')
+        $tt.BorderThickness = New-Object System.Windows.Thickness(1)
+        $tt.Padding = New-Object System.Windows.Thickness(10,8,10,8)
+        $ttText = New-Object System.Windows.Controls.TextBlock
+        $ttText.Text = $desc
+        $ttText.TextWrapping = 'Wrap'
+        $ttText.MaxWidth = 360
+        $tt.Content = $ttText
+        $hint.ToolTip = $tt
+        [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($hint, 150)
+        [System.Windows.Controls.ToolTipService]::SetShowDuration($hint, 20000)
+
+        $q = New-Object System.Windows.Controls.TextBlock
+        $q.Text = '?'
+        $q.Foreground = $hintFg
+        $q.FontWeight = 'Bold'
+        $q.FontSize = 12
+        $q.HorizontalAlignment = 'Center'
+        $q.VerticalAlignment = 'Center'
+        $hint.Child = $q
+
+        $row.Children.Add($hint) | Out-Null
+        $panel.Children.Add($row) | Out-Null
         $boxes[$t.Id] = $cb
     }
 
