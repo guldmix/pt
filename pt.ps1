@@ -1132,7 +1132,7 @@ function Invoke-UndoAll($owner){
     <Border Grid.Row="0" Background="#13131A" Padding="28,20">
       <StackPanel>
         <TextBlock Text="PerfTweaker" FontSize="26" FontWeight="Bold" Foreground="White"/>
-        <TextBlock Text="Windows 11 FPS &amp; latency tuner . 112 tweaks organized into 9 tabs . per-game profiles + NVIDIA"
+        <TextBlock Text="Windows 11 FPS &amp; latency tuner . 112 tweaks organized into 9 tabs . per-game profiles"
                    Foreground="{StaticResource Muted}" FontSize="12" Margin="0,4,0,0"/>
         <TextBlock Text="Anticheat-safe (VAC / EAC / BattlEye / Vanguard). Restore point + registry backup before Apply."
                    Foreground="#6EE7B7" FontSize="11" Margin="0,4,0,0"/>
@@ -1161,8 +1161,6 @@ function Invoke-UndoAll($owner){
                 <CheckBox x:Name="CbGpuPref" Content="Set Windows GPU preference: High Performance" IsChecked="True"/>
                 <CheckBox x:Name="CbFso" Content="Disable Fullscreen Optimizations for this .exe" IsChecked="True"/>
                 <CheckBox x:Name="CbShortcut" Content="Create 'High Priority' launch shortcut on Desktop" IsChecked="True"/>
-                <CheckBox x:Name="CbNvidia" Content="Apply NVIDIA per-game profile (Max Perf, Low Latency Ultra, Threaded Opt, Shader Cache)" IsChecked="True"/>
-                <TextBlock x:Name="TxtNvStatus" Foreground="{StaticResource Muted}" FontSize="11" Margin="28,4,0,0"/>
               </StackPanel>
             </Border>
           </StackPanel>
@@ -1206,19 +1204,10 @@ function Show-UI{
     $CbGpuPref  = $win.FindName('CbGpuPref')
     $CbFso      = $win.FindName('CbFso')
     $CbShortcut = $win.FindName('CbShortcut')
-    $CbNvidia   = $win.FindName('CbNvidia')
-    $TxtNvStat  = $win.FindName('TxtNvStatus')
     $BtnAll     = $win.FindName('BtnAll')
     $BtnNone    = $win.FindName('BtnNone')
     $BtnApply   = $win.FindName('BtnApply')
     $BtnUndo    = $win.FindName('BtnUndo')
-
-    if(Test-NvidiaPresent){
-        $TxtNvStat.Text = "NVIDIA GPU detected. Profile Inspector downloads from official GitHub on first use."
-    } else {
-        $CbNvidia.IsEnabled = $false; $CbNvidia.IsChecked = $false
-        $TxtNvStat.Text = "No NVIDIA GPU detected - NVIDIA profile tweak disabled."
-    }
 
     $state = Load-State
     $boxes = @{}
@@ -1301,15 +1290,12 @@ function Show-UI{
         $sel = @(); foreach($k in $boxes.Keys){ if($boxes[$k].IsChecked -and $boxes[$k].IsEnabled){ $sel += $k } }
         $perGame = $null
         if($selectedExe.Value){
-            if($CbNvidia.IsChecked -and (Test-NvidiaPresent)){
-                if(-not (Ensure-Npi $win)){ $CbNvidia.IsChecked = $false }
-            }
             $perGame = @{
                 Exe      = $selectedExe.Value
                 GpuPref  = [bool]$CbGpuPref.IsChecked
                 Fso      = [bool]$CbFso.IsChecked
                 Shortcut = [bool]$CbShortcut.IsChecked
-                Nvidia   = [bool]($CbNvidia.IsChecked -and (Test-NvidiaPresent) -and (Test-Path $NpiPath))
+                Nvidia   = $false
             }
         }
         if($sel.Count -eq 0 -and -not $perGame){
